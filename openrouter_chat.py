@@ -28,6 +28,6 @@ class ChatOpenRouter(ChatOpenAI):
         super().__init__(
             base_url="https://openrouter.ai/api/v1",
             openai_api_key=openai_api_key,
-            model="mistralai/mistral-7b-instruct:free",
+            model="mistralai/mistral-7b-instruct",
             **kwargs
         )
