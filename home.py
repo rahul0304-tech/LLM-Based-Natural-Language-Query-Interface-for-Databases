@@ -2,7 +2,8 @@
 import os
 import streamlit as st
 from sql_execution import execute_query
-from langchain.prompts import load_prompt, PromptTemplate
+from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts.loading import load_prompt
 from pathlib import Path
 from PIL import Image
 from openrouter_chat import ChatOpenRouter
