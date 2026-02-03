@@ -8,6 +8,7 @@ DEFAULT_CONNECTOR = "file_connector"
 
 def execute_query(query, connector_type=DEFAULT_CONNECTOR, limit: Optional[int] = None, **connector_params):
     """Execute a query using the specified connector type."""
+    connector = None
     try:
         print(f"sql_execution - Executing query with connector type: {connector_type}")
         print(f"sql_execution - Query parameters: {query}")
@@ -27,13 +28,18 @@ def execute_query(query, connector_type=DEFAULT_CONNECTOR, limit: Optional[int] 
         resultdf = connector.execute_query(query, limit=limit)
         print(f"sql_execution - Query executed successfully")
         
-        connector.close()
-        print(f"sql_execution - Connection closed")
         return resultdf
 
     except Exception as e:
         print(f"Error executing query: {e}")
         return pd.DataFrame({"error": [f"Error: {e}"]})
+    finally:
+        if connector:
+            try:
+                connector.close()
+                print(f"sql_execution - Connection closed")
+            except Exception as e:
+                print(f"Error closing connection: {e}")
 
 # For backward compatibility
 def execute_sf_query(sql, limit: Optional[int] = None):
