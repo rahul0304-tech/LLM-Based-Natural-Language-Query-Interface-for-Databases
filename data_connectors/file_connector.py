@@ -9,6 +9,17 @@ class FileConnector(DataConnector):
         self.data: Optional[Union[pd.DataFrame, Dict[str, pd.DataFrame]]] = None
         self.file_type: str = os.path.splitext(file_path)[1].lower()
     
+    def _convert_date_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Attempt to convert object columns to datetime."""
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                try:
+                    # Try to convert to datetime, ignore errors to leave non-dates as is
+                    df[col] = pd.to_datetime(df[col], errors='ignore')
+                except Exception:
+                    pass
+        return df
+
     def connect(self) -> bool:
         """Connect to the file and load its contents into memory.
         
@@ -26,8 +37,12 @@ class FileConnector(DataConnector):
             
             if self.file_type == '.csv':
                 self.data = pd.read_csv(self.file_path)
+                self.data = self._convert_date_columns(self.data)
             elif self.file_type in ['.xlsx', '.xls']:
                 self.data = pd.read_excel(self.file_path, sheet_name=None)
+                # Convert dates for each sheet
+                for sheet, df in self.data.items():
+                    self.data[sheet] = self._convert_date_columns(df)
             else:
                 raise ValueError(f"Unsupported file type: {self.file_type}")
             
