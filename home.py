@@ -6,7 +6,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.prompts.loading import load_prompt
 from pathlib import Path
 from PIL import Image
-from openrouter_chat import ChatOpenRouter
+from openrouter_chat import ChatOpenRouter, get_available_models
 
 # Project root directory
 current_dir = Path(__file__)
@@ -16,11 +16,16 @@ root_dir = current_dir.parent
 uploads_dir = root_dir / "uploads"
 uploads_dir.mkdir(exist_ok=True)
 for item in uploads_dir.iterdir():
-    if item.is_file():
-        item.unlink()
-    elif item.is_dir():
-        import shutil
-        shutil.rmtree(item)
+    try:
+        if item.is_file():
+            item.unlink()
+        elif item.is_dir():
+            import shutil
+            shutil.rmtree(item)
+    except PermissionError:
+        print(f"Skipped deleting {item} because it is in use.")
+    except Exception as e:
+        print(f"Error deleting {item}: {e}")
 
 # Define default prompt templates
 default_sql_template = PromptTemplate.from_template("""
@@ -98,12 +103,18 @@ IMPORTANT RULES FOR COLUMN NAMES AND FILTERS:
    - Less than: Column < number
    - Equal to: Column == number
 
-5. List Operations:
+5. Date/Time Operations:
+   - Month extraction: Column.dt.month == 1
+   - Year extraction: Column.dt.year == 2023
+   - Day extraction: Column.dt.day == 15
+   - Date comparison: Column > "2023-01-01"
+
+6. List Operations:
    - In list: Column.isin(["Value1", "Value2"])
    - ALWAYS use consistent quote style in lists
 
 User query: {input}
-Return ONLY the Python dictionary. Do NOT include any comments or additional text.
+Return ONLY the raw JSON string. Do NOT use markdown code blocks. Do NOT include any explanations.
 Query (Python dictionary with 'operation', 'columns', 'filter', etc.):
 """)
 
@@ -126,6 +137,22 @@ st.set_page_config(
     page_title="Query Assistant",
     page_icon="🌄"
 )
+
+# Fetch available models
+@st.cache_data
+def load_models():
+    return get_available_models()
+
+available_models = load_models()
+
+# Model selection in sidebar
+st.sidebar.title("Configuration")
+selected_model = st.sidebar.selectbox(
+    "Select Model",
+    available_models,
+    index=available_models.index("qwen/qwen3-30b-a3b:free") if "qwen/qwen3-30b-a3b:free" in available_models else 0
+)
+
 st.sidebar.success("Select a page above")
 
 # Add data source selection
@@ -252,21 +279,36 @@ elif data_source == "CSV/Excel":
         
         # Show file preview
         with st.sidebar.expander("File Preview"):
+            import pandas as pd
             if connector_type == "csv":
-                import pandas as pd
                 df = pd.read_csv(file_path)
-                st.dataframe(df.head())
             else:
-                import pandas as pd
                 df = pd.read_excel(file_path)
-                st.dataframe(df.head())
+            
+            # Auto-convert date columns for preview consistency
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    try:
+                        df[col] = pd.to_datetime(df[col], errors='ignore')
+                    except:
+                        pass
+            
+            st.dataframe(df.head())
         
-        # Use pandas prompt template for file operations with column information
+        # Use pandas prompt template for file operations with column information and data preview
         columns_info = ", ".join([f"`{col}`" for col in df.columns])
+        
+        # Get first few rows as string for context
+        try:
+            head_info = df.head(3).to_markdown(index=False)
+        except ImportError:
+            head_info = df.head(3).to_string(index=False)
+            
         prompt_template = PromptTemplate.from_template(
             default_pandas_template.template + 
             "\n\nAvailable columns: " + columns_info + 
-            "\nNote: Use exact column names as shown above, including backticks."
+            "\n\nDataset Preview (first 3 rows):\n" + head_info +
+            "\n\nNote: Use exact column names as shown above, including backticks. Infer data types from the preview."
         )
     else:
         st.warning("Please upload a CSV or Excel file")
@@ -301,21 +343,38 @@ elif data_source == "Google Sheets":
         )
         service = build('sheets', 'v4', credentials=credentials)
         
-        # Get sheet data
+        # Get sheet data (headers + first 3 rows)
         sheet = service.spreadsheets()
         result = sheet.values().get(
             spreadsheetId=spreadsheet_id,
-            range='A1:Z1'  # Get first row for headers
+            range='A1:Z4'  # Get first row for headers + 3 rows of data
         ).execute()
         
-        # Extract headers
+        # Extract headers and data
         if 'values' in result and result['values']:
-            headers = result['values'][0]
+            rows = result['values']
+            headers = rows[0]
+            data_rows = rows[1:] if len(rows) > 1 else []
+            
             columns_info = ", ".join([f"`{col}`" for col in headers])
+            
+            # Format data preview
+            preview_str = ""
+            if data_rows:
+                # Create a simple markdown-like table or just a list of rows
+                # Using pandas for consistent formatting if available, or manual string formatting
+                try:
+                    df_preview = pd.DataFrame(data_rows, columns=headers)
+                    preview_str = df_preview.to_markdown(index=False)
+                except (ImportError, ValueError):
+                    # Fallback if markdown not available or column mismatch
+                    preview_str = "\n".join([str(row) for row in data_rows])
+            
             prompt_template = PromptTemplate.from_template(
                 default_pandas_template.template + 
                 "\n\nAvailable columns: " + columns_info + 
-                "\nNote: Use exact column names as shown above, including backticks."
+                "\n\nDataset Preview (first 3 rows):\n" + preview_str +
+                "\n\nNote: Use exact column names as shown above, including backticks. Infer data types from the preview."
             )
         else:
             prompt_template = default_pandas_template
@@ -346,11 +405,12 @@ if st.button("Generate Query and Execute"):
     else:
         connector_type = st.session_state['connector_type']
         connector_params = st.session_state['connector_params']
+        query_text = None
         try:
             try:
                 # Initialize LLM with consistent configuration
                 llm = ChatOpenRouter(
-                    model_name="qwen3-30b-a3b:free",
+                    model_name=selected_model,
                     temperature=0.3,
                     max_tokens=500
                 )
@@ -373,19 +433,46 @@ if st.button("Generate Query and Execute"):
                     error_msg = "API rate limit exceeded. Please wait a moment and try again."
                 results_display.error(error_msg)
             
-
-            
-            # Execute query if we have valid connector parameters
-            if connector_params:
+            # Execute query if we have valid connector parameters and a generated query
+            if connector_params and query_text:
                 try:
                     # Handle different query types based on data source
                     if data_source in ["CSV/Excel", "Google Sheets"]:
                         # Parse dictionary-style queries for pandas operations
                         try:
                             import json
-                            query_dict = json.loads(query_text)
-                            # Extract limit from user_question if present
                             import re
+                            
+                            # Clean up the response to extract JSON
+                            clean_query_text = query_text.strip()
+                            
+                            # Robust JSON extraction: Find the first '{' and last '}'
+                            start_idx = clean_query_text.find('{')
+                            end_idx = clean_query_text.rfind('}')
+                            
+                            if start_idx != -1 and end_idx != -1:
+                                clean_query_text = clean_query_text[start_idx:end_idx+1]
+                            else:
+                                # If no brackets found, try to fix common issues or fail gracefully
+                                pass
+
+                            # Try to handle common JSON syntax errors from LLMs
+                            try:
+                                query_dict = json.loads(clean_query_text)
+                            except json.JSONDecodeError:
+                                # Try to fix common issues
+                                # 1. Replace single quotes with double quotes
+                                fixed_text = clean_query_text.replace("'", '"')
+                                # 2. Fix trailing commas
+                                fixed_text = re.sub(r',\s*\}', '}', fixed_text)
+                                fixed_text = re.sub(r',\s*\]', ']', fixed_text)
+                                try:
+                                    query_dict = json.loads(fixed_text)
+                                except:
+                                    # If repair fails, raise original error with context
+                                    raise ValueError(f"Failed to parse JSON: {clean_query_text[:100]}...")
+
+                            # Extract limit from user_question if present
                             limit_match = re.search(r'\b(?:top|any)\s+(\d+)\b', prompt, re.IGNORECASE)
                             if limit_match:
                                 query_dict['limit'] = int(limit_match.group(1))
@@ -415,8 +502,8 @@ if st.button("Generate Query and Execute"):
                                             clean_col = col.strip('`')
                                             if clean_col not in df.columns:
                                                 raise ValueError(f"Invalid column in filter: {clean_col}\nAvailable columns: {', '.join(df.columns)}")
-                                            # Replace 'Column' placeholder with column name (no backticks)
-                                            expr = expr.replace('Column', clean_col)
+                                            # Replace 'Column' placeholder with column name (wrapped in backticks for safety)
+                                            expr = expr.replace('Column', f"`{clean_col}`")
                                             filter_items.append(expr)
                                         filter_expr = ' and '.join(filter_items) if filter_items else None
                                     elif isinstance(query_dict['filter'], str):
